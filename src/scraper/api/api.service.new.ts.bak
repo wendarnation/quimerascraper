@@ -1,0 +1,395 @@
+// src/scraper/api/api.service.ts
+import { Injectable, Logger } from '@nestjs/common';
+import { HttpService } from '@nestjs/axios';
+import { ConfigService } from '@nestjs/config';
+import { firstValueFrom } from 'rxjs';
+import {
+  ZapatillaScraped,
+  TiendaInfo,
+} from '../interfaces/quimera-scraper.interface';
+
+@Injectable()
+export class ApiService {
+  private readonly logger = new Logger(ApiService.name);
+  private token: string | null = null;
+  private tokenExpiry: Date | null = null;
+  private readonly apiBaseUrl: string;
+
+  constructor(
+    private readonly httpService: HttpService,
+    private readonly configService: ConfigService,
+  ) {
+    this.apiBaseUrl = this.configService.get<string>('API_BASE_URL') || '';
+  }
+
+  /**
+   * Obtiene un token de autenticación de Auth0 que simula un usuario con un rol específico
+   */
+  async getToken(): Promise<string> {
+    // Si ya tenemos un token válido, lo devolvemos
+    if (this.token && this.tokenExpiry && this.tokenExpiry > new Date()) {
+      return this.token;
+    }
+
+    try {
+      const auth0Domain = this.configService.get<string>('AUTH0_DOMAIN');
+      const clientId = this.configService.get<string>(
+        'AUTH0_SCRAPER_CLIENT_ID',
+      );
+      const clientSecret = this.configService.get<string>(
+        'AUTH0_SCRAPER_CLIENT_SECRET',
+      );
+      const audience = this.configService.get<string>('AUTH0_AUDIENCE');
+      const scope = this.configService.get<string>('AUTH0_SCOPE') || 'admin:zapatillas';
+
+      this.logger.log('Obteniendo nuevo token de Auth0 (simula usuario con rol)...');
+
+      // En lugar de client_credentials, usamos password grant con un usuario predefinido
+      // Opcional: estos valores podrían venir de variables de entorno
+      const email = this.configService.get<string>('AUTH0_USER_EMAIL') || 'admin@quimera.com';
+      const password = this.configService.get<string>('AUTH0_USER_PASSWORD') || 'TuContrasenaSegura123!';
+      
+      const response = await firstValueFrom(
+        this.httpService.post(
+          `https://${auth0Domain}/oauth/token`,
+          {
+            client_id: clientId,
+            client_secret: clientSecret,
+            audience: audience,
+            grant_type: 'password',  // Cambiado de client_credentials a password
+            scope: scope,
+            username: email,
+            password: password
+          },
+          {
+            headers: { 'Content-Type': 'application/json' },
+          },
+        ),
+      );
+
+      this.token = (response.data.access_token as string) || '';
+      // Establecer expiración token (normalmente 24h para client credentials)
+      this.tokenExpiry = new Date(Date.now() + response.data.expires_in * 1000);
+
+      this.logger.log('Token de Auth0 obtenido correctamente (con rol de usuario)');
+
+      return this.token;
+    } catch (error) {
+      this.logger.error(`Error al obtener token de Auth0: ${error.message}`);
+      
+      // Si falla el método de password grant, intentamos con el método tradicional
+      return this.getTokenFallback();
+    }
+  }
+
+  /**
+   * Método alternativo para obtener un token a través de Auth0 Management API
+   * Este método crea un token con permisos específicos como si fuera un usuario
+   */
+  async getTokenViaManagement(): Promise<string> {
+    try {
+      // Si ya tenemos un token válido, lo devolvemos
+      if (this.token && this.tokenExpiry && this.tokenExpiry > new Date()) {
+        return this.token;
+      }
+
+      // Primero obtenemos un token de Management API
+      const auth0Domain = this.configService.get<string>('AUTH0_DOMAIN');
+      const clientId = this.configService.get<string>('AUTH0_SCRAPER_CLIENT_ID');
+      const clientSecret = this.configService.get<string>('AUTH0_SCRAPER_CLIENT_SECRET');
+
+      // 1. Obtener un token de management API
+      const managementResponse = await firstValueFrom(
+        this.httpService.post(
+          `https://${auth0Domain}/oauth/token`,
+          {
+            client_id: clientId,
+            client_secret: clientSecret,
+            audience: `https://${auth0Domain}/api/v2/`,
+            grant_type: 'client_credentials',
+          },
+          {
+            headers: { 'Content-Type': 'application/json' },
+          },
+        ),
+      );
+
+      const managementToken = managementResponse.data.access_token;
+
+      // 2. Usar el token de management para crear un token de API con rol específico
+      // 2.1 Primero buscar un usuario existente o crear uno nuevo
+      const userEmail = this.configService.get<string>('AUTH0_USER_EMAIL') || 'admin@quimera.com';
+      
+      let userId;
+      try {
+        // Buscar si el usuario ya existe
+        const userSearchResponse = await firstValueFrom(
+          this.httpService.get(
+            `https://${auth0Domain}/api/v2/users-by-email?email=${encodeURIComponent(userEmail)}`,
+            {
+              headers: {
+                Authorization: `Bearer ${managementToken}`,
+                'Content-Type': 'application/json',
+              },
+            },
+          ),
+        );
+
+        if (userSearchResponse.data && userSearchResponse.data.length > 0) {
+          // Usuario encontrado
+          userId = userSearchResponse.data[0].user_id;
+          this.logger.log(`Usuario encontrado: ${userId}`);
+        } else {
+          // Usuario no encontrado, hay que crearlo
+          const password = this.configService.get<string>('AUTH0_USER_PASSWORD') || 'TuContrasenaSegura123!';
+          
+          const createUserResponse = await firstValueFrom(
+            this.httpService.post(
+              `https://${auth0Domain}/api/v2/users`,
+              {
+                email: userEmail,
+                password: password,
+                connection: 'Username-Password-Authentication',
+                email_verified: true,
+              },
+              {
+                headers: {
+                  Authorization: `Bearer ${managementToken}`,
+                  'Content-Type': 'application/json',
+                },
+              },
+            ),
+          );
+          
+          userId = createUserResponse.data.user_id;
+          this.logger.log(`Usuario creado: ${userId}`);
+        }
+
+        // 2.2 Asignar rol al usuario
+        const roleName = 'Admin';
+        
+        // Buscar el ID del rol
+        const rolesResponse = await firstValueFrom(
+          this.httpService.get(`https://${auth0Domain}/api/v2/roles`, {
+            headers: {
+              Authorization: `Bearer ${managementToken}`,
+              'Content-Type': 'application/json',
+            },
+          }),
+        );
+
+        const adminRole = rolesResponse.data.find(
+          (role) => role.name.toLowerCase() === roleName.toLowerCase(),
+        );
+
+        if (!adminRole) {
+          throw new Error(`No se encontró el rol ${roleName}`);
+        }
+
+        // Asignar rol al usuario
+        await firstValueFrom(
+          this.httpService.post(
+            `https://${auth0Domain}/api/v2/users/${userId}/roles`,
+            {
+              roles: [adminRole.id],
+            },
+            {
+              headers: {
+                Authorization: `Bearer ${managementToken}`,
+                'Content-Type': 'application/json',
+              },
+            },
+          ),
+        );
+
+        this.logger.log(`Rol ${roleName} asignado al usuario ${userId}`);
+
+        // 3. Ahora obtenemos un token para el usuario con el rol asignado
+        const audience = this.configService.get<string>('AUTH0_AUDIENCE');
+        const scope = this.configService.get<string>('AUTH0_SCOPE') || 'admin:zapatillas';
+
+        // Generamos un token de acceso para el usuario
+        const tokenResponse = await firstValueFrom(
+          this.httpService.post(
+            `https://${auth0Domain}/oauth/token`,
+            {
+              client_id: clientId,
+              client_secret: clientSecret,
+              audience: audience,
+              grant_type: 'password',
+              username: userEmail,
+              password: this.configService.get<string>('AUTH0_USER_PASSWORD') || 'TuContrasenaSegura123!',
+              scope: scope,
+            },
+            {
+              headers: { 'Content-Type': 'application/json' },
+            },
+          ),
+        );
+
+        this.token = tokenResponse.data.access_token;
+        this.tokenExpiry = new Date(Date.now() + tokenResponse.data.expires_in * 1000);
+
+        this.logger.log(`Token obtenido para usuario con rol ${roleName}`);
+        return this.token;
+      } catch (error) {
+        this.logger.error(`Error en getTokenViaManagement: ${error.message}`);
+        // Si falla el método avanzado, intentamos con el método simple
+        return this.getTokenFallback();
+      }
+    } catch (error) {
+      this.logger.error(`Error al obtener token via Management API: ${error.message}`);
+      throw new Error('No se pudo obtener token de autenticación');
+    }
+  }
+
+  /**
+   * Método de respaldo para obtener un token usando client credentials
+   * Esto es útil como fallback si los otros métodos fallan
+   */
+  private async getTokenFallback(): Promise<string> {
+    try {
+      const auth0Domain = this.configService.get<string>('AUTH0_DOMAIN');
+      const clientId = this.configService.get<string>(
+        'AUTH0_SCRAPER_CLIENT_ID',
+      );
+      const clientSecret = this.configService.get<string>(
+        'AUTH0_SCRAPER_CLIENT_SECRET',
+      );
+      const audience = this.configService.get<string>('AUTH0_AUDIENCE');
+      const scope = this.configService.get<string>('AUTH0_SCOPE') || 'admin:zapatillas';
+
+      this.logger.log('Obteniendo token fallback de Auth0 usando client credentials...');
+
+      const response = await firstValueFrom(
+        this.httpService.post(
+          `https://${auth0Domain}/oauth/token`,
+          {
+            client_id: clientId,
+            client_secret: clientSecret,
+            audience: audience,
+            grant_type: 'client_credentials',
+            scope: scope,
+          },
+          {
+            headers: { 'Content-Type': 'application/json' },
+          },
+        ),
+      );
+
+      this.token = (response.data.access_token as string) || '';
+      this.tokenExpiry = new Date(Date.now() + response.data.expires_in * 1000);
+
+      this.logger.log('Token fallback de Auth0 obtenido correctamente');
+
+      return this.token;
+    } catch (error) {
+      this.logger.error(`Error al obtener token fallback: ${error.message}`);
+      throw new Error('No se pudo obtener token de autenticación');
+    }
+  }
+
+  /**
+   * Realiza una petición autenticada a la API
+   */
+  async makeAuthenticatedRequest(
+    method: string,
+    endpoint: string,
+    data?: any,
+  ): Promise<any> {
+    try {
+      // Intentar usar el token con rol primero
+      const token = await this.getToken();
+      const url = `${this.apiBaseUrl}${endpoint}`;
+
+      const requestConfig = {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+      };
+
+      this.logger.debug(`Realizando petición ${method.toUpperCase()} a ${url}`);
+
+      let response;
+      switch (method.toLowerCase()) {
+        case 'get':
+          response = await firstValueFrom(
+            this.httpService.get(url, requestConfig),
+          );
+          break;
+        case 'post':
+          response = await firstValueFrom(
+            this.httpService.post(url, data, requestConfig),
+          );
+          break;
+        case 'put':
+          response = await firstValueFrom(
+            this.httpService.put(url, data, requestConfig),
+          );
+          break;
+        case 'patch':
+          response = await firstValueFrom(
+            this.httpService.patch(url, data, requestConfig),
+          );
+          break;
+        case 'delete':
+          response = await firstValueFrom(
+            this.httpService.delete(url, requestConfig),
+          );
+          break;
+        default:
+          throw new Error(`Método HTTP no soportado: ${method}`);
+      }
+
+      return response.data;
+    } catch (error) {
+      let errorMessage = `Error en request ${method} a ${endpoint}: ${error.message}`;
+
+      if (error.response) {
+        errorMessage += ` - Status: ${error.response.status}, Data: ${JSON.stringify(error.response.data)}`;
+      }
+
+      this.logger.error(errorMessage);
+      throw error;
+    }
+  }
+
+  /**
+   * Obtiene la lista de tiendas
+   */
+  async getTiendas(): Promise<TiendaInfo[]> {
+    try {
+      const response = await this.makeAuthenticatedRequest('get', '/tiendas');
+      return Array.isArray(response)
+        ? response.filter((tienda) => tienda.activa)
+        : [];
+    } catch (error) {
+      this.logger.error(`Error al obtener tiendas: ${error.message}`);
+      return [];
+    }
+  }
+
+  /**
+   * Crea o actualiza una zapatilla
+   */
+  async createOrUpdateZapatilla(zapatilla: {
+    marca: string;
+    modelo: string;
+    sku: string;
+    imagen?: string;
+    descripcion?: string;
+  }): Promise<any> {
+    try {
+      // Primero verificamos si la zapatilla ya existe buscando por SKU
+      const existingZapatillas = await this.makeAuthenticatedRequest(
+        'get',
+        `/zapatillas?sku=${encodeURIComponent(zapatilla.sku)}`,
+      );
+
+      if (existingZapatillas && existingZapatillas.length > 0) {
+        // Si existe, la actualizamos
+        const existingZapatilla = existingZapatillas[0];
+        this.logger.log(
+          `Actualizando zapatilla existente con ID ${existingZapatilla.id}`,
+        );
