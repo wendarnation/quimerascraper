@@ -1,0 +1,15 @@
+Para compilar el proyecto, debes ejecutar el siguiente comando en la carpeta del proyecto:
+
+```
+npm run build
+```
+
+Esto generará los archivos JavaScript compilados en la carpeta "dist".
+
+Una vez que la compilación haya terminado, puedes ejecutar el scraper con:
+
+```
+npm start
+```
+
+o con el comando específico configurado en package.json.

@@ -411,7 +411,7 @@ export class FootlockerScraper extends BaseTiendaScraper {
     }
 
     // Extraer información del producto
-    const productData = await this.page.evaluate(() => {
+    const productData = await this.page.evaluate((pageUrl) => {
       // Función auxiliar para extraer texto con manejo de errores
       const getText = (selector: string): string => {
         try {
@@ -438,25 +438,124 @@ export class FootlockerScraper extends BaseTiendaScraper {
         document.querySelector('.ProductDetails')?.outerHTML ||
         document.body.innerHTML;
       console.log(htmlEstructura.substring(0, 500) + '...');
+      
+      // Buscar todos los atributos atvec-* en la página para diagnóstico
+      console.log('Buscando atributos atvec-* en la página:');
+      const elementosAtvec = document.querySelectorAll('[atvec-brand], [atvec-sku], [atvec-category], [atvec-modelnumber], [atvec-genderage]');
+      console.log(`Encontrados ${elementosAtvec.length} elementos con atributos atvec-*`);
+      
+      elementosAtvec.forEach((elemento, idx) => {
+        console.log(`Elemento atvec #${idx + 1}:`);
+        console.log(` - atvec-brand: ${elemento.getAttribute('atvec-brand') || 'no disponible'}`);
+        console.log(` - atvec-sku: ${elemento.getAttribute('atvec-sku') || 'no disponible'}`);
+        console.log(` - atvec-modelnumber: ${elemento.getAttribute('atvec-modelnumber') || 'no disponible'}`);
+        console.log(` - atvec-genderage: ${elemento.getAttribute('atvec-genderage') || 'no disponible'}`);
+        console.log(` - atvec-category: ${elemento.getAttribute('atvec-category') || elemento.getAttribute('atvec-categorytype') || 'no disponible'}`);
+        console.log(` - tagName: ${elemento.tagName}`);
+      });
 
-      // Basado en la quinta captura, vemos que el nombre del producto está en:
-      // <span itemprop="name" class="ProductName-primary">adidas Megaride</span>
-      // Y la categoría (Hombre) está en:
-      // <span class="ProductName-alt">Hombre</span>
-      const marca = getText('span.ProductName-primary').split(' ')[0] || '';
-      const modeloSinMarca = getText('span.ProductName-primary')
-        .replace(marca, '')
-        .trim();
+      // ***** SOLUCIÓN AL BUG: DETECCIÓN CORRECTA DE MARCA Y MODELO *****
+      
+      // PASO 1: BUSCAR TODAS LAS FUENTES POSIBLES DE MARCA
+      
+      // 1a. Buscar atributo atvec-brand en div#app
+      const divApp = document.querySelector('div#app');
+      console.log('=== DIV APP ATRIBUTOS ===');
+      if (divApp) {
+        console.log('Encontrado div#app con estos atributos:');
+        const attrNames = divApp.getAttributeNames();
+        console.log(`Atributos: ${attrNames.join(', ')}`);
+        attrNames.forEach(attr => console.log(`${attr}: "${divApp.getAttribute(attr)}"`));
+      } else {
+        console.log('No se encontró div#app');
+      }
+      
+      // 1b. Analizar URL para detección de marca en URL
+      console.log(`URL página: ${pageUrl}`);
+      
+      // 1c. Verificar todos los elementos con atvec-brand
+      const elementosConMarca = document.querySelectorAll('[atvec-brand]');
+      console.log(`Encontrados ${elementosConMarca.length} elementos con atributo atvec-brand`);
+      
+      // PASO 2: DECIDIR LA MARCA A USAR
+      
+      // Definir marca: primero desde atributos, luego desde URL, finalmente de la primera palabra del nombre
+      let marcaAtributo = '';
+      
+      // 2a. Intentar obtener de cualquier elemento con atributo atvec-brand
+      if (elementosConMarca.length > 0) {
+        marcaAtributo = elementosConMarca[0].getAttribute('atvec-brand') || '';
+        console.log(`Marca obtenida de atvec-brand: "${marcaAtributo}"`);
+      }
+      
+      // 2b. Si no se encontró, buscar en la URL para casos especiales
+      if (!marcaAtributo) {
+        // Solución para New Balance
+        if (pageUrl.toLowerCase().includes('new-balance')) {
+          marcaAtributo = 'New Balance';
+          console.log(`Marca obtenida de URL (new-balance): "${marcaAtributo}"`);
+        }
+        // Solución para Adidas
+        else if (pageUrl.toLowerCase().includes('/adidas-')) {
+          marcaAtributo = 'adidas';
+          console.log(`Marca obtenida de URL (adidas): "${marcaAtributo}"`);
+        }
+        // Solución para Nike
+        else if (pageUrl.toLowerCase().includes('/nike-')) {
+          marcaAtributo = 'Nike';
+          console.log(`Marca obtenida de URL (nike): "${marcaAtributo}"`);
+        }
+      }
+      
+      // 2c. Obtener modelo de ProductName-primary
+      const modeloTextoCompleto = getText('span.ProductName-primary');
+      console.log(`Texto completo del modelo: "${modeloTextoCompleto}"`);
+      
+      // Marca final (atributo, URL o primera palabra del nombre)
+      const marca = marcaAtributo || modeloTextoCompleto.split(' ')[0] || '';
+      console.log(`MARCA FINAL ELEGIDA: "${marca}"`);
+      
+      // PASO 3: EXTRAER MODELO CORRECTO
+      let modeloSinMarca = '';
+      
+      // 3a. Caso New Balance: extraer solo el número después de "New Balance"
+      if (marca === 'New Balance' && modeloTextoCompleto.toLowerCase().includes('new balance')) {
+        modeloSinMarca = modeloTextoCompleto.replace(/new\s+balance/i, '').trim();
+        console.log(`Caso especial New Balance: modelo="${modeloSinMarca}"`);
+      }
+      // 3b. Caso general: quitar la marca del inicio del modelo
+      else if (modeloTextoCompleto.toLowerCase().startsWith(marca.toLowerCase())) {
+        modeloSinMarca = modeloTextoCompleto.substring(marca.length).trim();
+        console.log(`Marca eliminada del inicio: "${modeloSinMarca}"`);
+      }
+      // 3c. Si la marca está en otra parte, intentar quitarla con regex
+      else if (marca && modeloTextoCompleto.toLowerCase().includes(marca.toLowerCase())) {
+        try {
+          // Escapar caracteres especiales en la marca para la regex
+          const marcaEscapada = marca.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          const regex = new RegExp(`\\b${marcaEscapada}\\b`, 'i');
+          modeloSinMarca = modeloTextoCompleto.replace(regex, '').trim();
+          // Eliminar espacios duplicados que puedan quedar
+          modeloSinMarca = modeloSinMarca.replace(/\s+/g, ' ').trim();
+          console.log(`Marca eliminada con regex: "${modeloSinMarca}"`);
+        } catch (e) {
+          console.log(`Error al aplicar regex: ${e}`);
+          modeloSinMarca = modeloTextoCompleto;
+        }
+      }
+      // 3d. Si no se puede quitar, usar el modelo completo
+      else {
+        modeloSinMarca = modeloTextoCompleto;
+        console.log(`No se pudo quitar marca, usando modelo completo: "${modeloSinMarca}"`);
+      }
+      
+      // PASO 4: CATEGORÍA (no usada para modelo)
       const categoria = getText('span.ProductName-alt');
-
-      console.log('Marca extraída:', marca);
-      console.log('Modelo sin marca:', modeloSinMarca);
-      console.log('Categoría:', categoria);
-
-      // Combinar para crear el modelo completo
-      const modeloCompleto = `${modeloSinMarca} ${categoria}`.trim();
-
-      console.log('Modelo completo:', modeloCompleto);
+      console.log(`Categoría (NO usada en el modelo): "${categoria}"`);
+      
+      // PASO 5: Obtener solo el modelo, sin incluir categoría
+      const modeloCompleto = modeloSinMarca.trim();
+      console.log(`MODELO FINAL: "${modeloCompleto}"`);
 
       // Basado en la quinta captura, el precio está en:
       // <span>€ 169,99</span>
@@ -644,6 +743,18 @@ export class FootlockerScraper extends BaseTiendaScraper {
           console.log('SKU extraído de Product #:', sku);
         }
       }
+      
+      // También buscar el SKU en el atributo atvec-sku
+      if (!sku && elementosAtvec.length > 0) {
+        for (const elemento of elementosAtvec) {
+          const skuAtributo = elemento.getAttribute('atvec-sku');
+          if (skuAtributo) {
+            sku = skuAtributo;
+            console.log('SKU encontrado en atributo atvec-sku:', sku);
+            break;
+          }
+        }
+      }
 
       // Extraer color
       let color = '';
@@ -677,8 +788,9 @@ export class FootlockerScraper extends BaseTiendaScraper {
         color,
         sku,
         tallas,
+        categoria, // Agregamos la categoría para tenerla disponible, aunque no se use en el nombre del modelo
       };
-    });
+    }, url); // Pasamos la URL de la página al callback para detección de marca
 
     // Si no se pudo extraer un SKU de la página, intentamos extraerlo de la URL o del Product #
     let sku = productData.sku;
@@ -742,8 +854,18 @@ export class FootlockerScraper extends BaseTiendaScraper {
       `SKU generado: ${sku} para producto ${productData.marca} ${productData.modelo}`,
     );
 
-    // Normalizar marca
+    // Normalizar marca - asegurarse de que sea siempre la marca completa
+    // (ej: "New Balance", no solo "New")
     const marcaNormalizada = this.normalizarMarca(productData.marca);
+    
+    // Log detallado para verificar la extracción correcta de marca/modelo
+    this.logger.log('='.repeat(80));
+    this.logger.log('VERIFICACIÓN FINAL DE MARCA/MODELO:');
+    this.logger.log(`Marca original extraída: "${productData.marca}"`);
+    this.logger.log(`Marca normalizada: "${marcaNormalizada}"`);
+    this.logger.log(`Modelo extraído (sin categoría): "${productData.modelo}"`);
+    this.logger.log(`Categoría (NO usada para el modelo): "${productData.categoria || ''}"`);
+    this.logger.log('='.repeat(80));
 
     // Solo procesar tallas REALES encontradas en la página
     const tallasFiltradas = (productData.tallas || []).filter(
@@ -761,10 +883,10 @@ export class FootlockerScraper extends BaseTiendaScraper {
       );
     }
 
-    // Generar el objeto zapatilla
+    // Generar el objeto zapatilla - usando SOLO el modelo sin la categoría
     const zapatilla = {
       marca: marcaNormalizada,
-      modelo: this.limpiarTexto(productData.modelo),
+      modelo: this.limpiarTexto(productData.modelo), // SOLO el modelo sin categoría
       sku: sku,
       imagen: productData.imagen,
       descripcion: this.limpiarTexto(productData.descripcion),
@@ -772,7 +894,7 @@ export class FootlockerScraper extends BaseTiendaScraper {
       url_producto: url,
       tallas: tallasFiltradas,
       tienda_id: this.tiendaInfo.id,
-      modelo_tienda: this.limpiarTexto(productData.modelo),
+      modelo_tienda: this.limpiarTexto(productData.modelo), // También sin categoría
       color: productData.color || '',
       fecha_scrape: new Date(),
     };
