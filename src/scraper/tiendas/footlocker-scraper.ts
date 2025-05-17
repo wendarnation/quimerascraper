@@ -633,6 +633,8 @@ export class FootlockerScraper extends BaseTiendaScraper {
         .map((boton) => {
           // Extraer la talla del aria-label (Size: 40 -> 40)
           const ariaLabel = boton.getAttribute('aria-label') || '';
+          console.log(`Texto completo del aria-label: "${ariaLabel}"`);
+          
           const tallaMatch = ariaLabel.match(
             /Size:\s*(\d+(?:\.\d+)?(?:\s+\d+\/\d+)?)/,
           );
@@ -644,11 +646,17 @@ export class FootlockerScraper extends BaseTiendaScraper {
           const classNameIncludes =
             (boton.className || '').includes('disabled') ||
             (boton.className || '').includes('outOfStock');
+            
+          // MEJORA IMPORTANTE: Verificar si el aria-label contiene texto adicional como "Agotadas"
+          // que indica que la talla no está disponible (como se ve en la captura de pantalla)
+          const contienePalabraAgotada = ariaLabel.toLowerCase().includes('agotadas') || 
+                                        ariaLabel.toLowerCase().includes('agotados') || 
+                                        ariaLabel.toLowerCase().includes('no disponible');
+          
+          // Si tiene la palabra agotada en el aria-label O está deshabilitado O tiene clase que indica no disponible
+          const disponible = !disabled && !classNameIncludes && !contienePalabraAgotada;
 
-          // Si no está deshabilitado ni tiene clase de no disponible, considerarlo como disponible
-          const disponible = !disabled && !classNameIncludes;
-
-          console.log(`Talla encontrada: ${talla}, Disponible: ${disponible}`);
+          console.log(`Talla encontrada: ${talla}, Disponible: ${disponible}, AriaLabel: "${ariaLabel}"`);
 
           return {
             talla,

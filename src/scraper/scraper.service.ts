@@ -278,10 +278,16 @@ export class ScraperService {
           this.logger.log(`Inicializando array de tallas vacío para ${zapatilla.marca} ${zapatilla.modelo}`);
         }
         
-        // Asegurar que todas las tallas encontradas tengan disponible = true
+        // Verificar que todas las tallas encontradas tengan un valor definido para disponible (no forzar a true)
         zapatilla.tallas.forEach(t => {
-          t.disponible = true;
-          this.logger.log(`Asegurando que talla ${t.talla} tiene disponible=true`);
+          // Si disponible es undefined, asignarle un valor, pero NO forzar a true
+          if (t.disponible === undefined) {
+            // Dejar que el valor por defecto sea false (más conservador)
+            t.disponible = false;
+            this.logger.log(`Talla ${t.talla} no tiene definido disponible, estableciendo a false por defecto`);
+          } else {
+            this.logger.log(`Talla ${t.talla} tiene disponible=${t.disponible}`);
+          }
         });
       });
 
@@ -353,7 +359,7 @@ export class ScraperService {
         // Asegurar que tallas siempre estén definidas y sean válidas
         tallas: (z.tallas || []).filter(t => t && t.talla)?.map(t => ({
           talla: t.talla.trim(),
-          disponible: t.disponible === undefined ? true : Boolean(t.disponible)
+          disponible: t.disponible === undefined ? false : Boolean(t.disponible)
         })) || []
       }));
 
@@ -366,9 +372,13 @@ export class ScraperService {
         this.logger.log(`Inicializando array de tallas vacío para ${z.marca} ${z.modelo}`);
       }
       
-      // Asegurar que todas las tallas tienen disponible = true
+      // Asegurar que todas las tallas tienen un valor para disponible (no forzar a true)
       z.tallas.forEach(t => {
-        t.disponible = true;
+        // Si disponible es undefined, establecerlo a false por defecto (más conservador)
+        if (t.disponible === undefined) {
+          t.disponible = false;
+          this.logger.log(`Estableciendo disponible=false para talla ${t.talla} de ${z.marca} ${z.modelo} (valor no definido)`);
+        }
       });
     });
 

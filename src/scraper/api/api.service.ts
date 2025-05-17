@@ -439,7 +439,7 @@ export class ApiService {
 
           // Datos para la nueva relación
           const sendData = {
-            disponible: true, // FORZAR DISPONIBILIDAD A TRUE
+            disponible: true, // Disponibilidad para relación zapatilla-tienda (separado de tallas)
             zapatilla_id: zapatillaIdNum,
             tienda_id: tiendaIdNum,
             precio: precioNum,
@@ -536,8 +536,8 @@ export class ApiService {
         .replace(/\s+(eu|eur|us|uk)$/i, '')
         .trim();
 
-      // IMPORTANTE: Forzar disponibilidad a TRUE siempre
-      disponible = true;
+      // IMPORTANTE: Respetar el valor de disponibilidad pasado por parámetro
+      // disponible = true;
 
       // Log para debugging
       this.logger.log(
@@ -549,7 +549,7 @@ export class ApiService {
         const datos = {
           zapatilla_tienda_id: zapatillaTiendaId,
           talla: tallaString,
-          disponible: true,
+          disponible: disponible,
         };
 
         // Log específico para valores decimales
@@ -586,17 +586,17 @@ export class ApiService {
             const tallaExistente = busqueda[0];
 
             // Actualizar disponibilidad si es necesario
-            if (tallaExistente.disponible !== true) {
-              await this.makeAuthenticatedRequest(
-                'patch',
-                `/tallas/${tallaExistente.id}`,
-                { disponible: true },
-              );
-              this.logger.log(
-                `✅ Talla "${tallaString}" actualizada a disponible`,
-              );
+            if (tallaExistente.disponible !== disponible) {
+            await this.makeAuthenticatedRequest(
+            'patch',
+            `/tallas/${tallaExistente.id}`,
+            { disponible: disponible },
+            );
+            this.logger.log(
+            `✅ Talla "${tallaString}" actualizada a disponible: ${disponible}`,
+            );
             } else {
-              this.logger.log(`✅ Talla "${tallaString}" ya estaba disponible`);
+            this.logger.log(`✅ Talla "${tallaString}" ya tenía disponible: ${disponible}`);
             }
 
             return tallaExistente;
@@ -613,9 +613,9 @@ export class ApiService {
 
               try {
                 const datosAlt = {
-                  zapatilla_tienda_id: zapatillaTiendaId,
-                  talla: tallAlternativa,
-                  disponible: true,
+                zapatilla_tienda_id: zapatillaTiendaId,
+                talla: tallAlternativa,
+                disponible: disponible,
                 };
 
                 const resultadoAlt = await this.makeAuthenticatedRequest(
@@ -824,7 +824,7 @@ export class ApiService {
         })
         .map((talla) => ({
           talla: talla.talla.trim(),
-          disponible: true, // FORZAR SIEMPRE a TRUE - Fix para el problema de disponibilidad
+          disponible: talla.disponible, // Mantener el valor original detectado por el scraper
         }));
 
       this.logger.log(
@@ -840,7 +840,7 @@ export class ApiService {
       });
 
       // Procesar cada talla SECUENCIALMENTE con el método simplificado
-      this.logger.log('IMPORTANTE: Procesando tallas con método simplificado');
+      this.logger.log('IMPORTANTE: Procesando tallas con método simplificado que preserva disponibilidad');
 
       let tallasActualizadas = 0;
       let tallasFallidas = 0;
@@ -848,7 +848,7 @@ export class ApiService {
       for (const [index, talla] of tallasArray.entries()) {
         try {
           // Usar nuestro método corregido para crear/actualizar la talla
-          await this.createOrUpdateTalla(zapatillaTienda.id, talla.talla, true);
+          await this.createOrUpdateTalla(zapatillaTienda.id, talla.talla, talla.disponible);
 
           tallasActualizadas++;
 
