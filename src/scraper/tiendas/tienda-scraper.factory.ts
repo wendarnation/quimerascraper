@@ -6,6 +6,8 @@ import { FootlockerScraper } from './footlocker-scraper';
 import { JdSportsScraper } from './jdsports-scraper';
 import { SnipesScraper } from './snipes-scraper';
 import { NigramercatoScraper } from './nigramercato-scraper';
+import { FootdistrictScraper } from './footdistrict-scraper';
+import { TheSneakerOneScraper } from './thesneakerone-scraper';
 
 @Injectable()
 export class TiendaScraperFactory {
@@ -34,9 +36,26 @@ export class TiendaScraperFactory {
     if (tiendaNombre.includes('snipes') || tiendaUrl.includes('snipes')) {
       return new SnipesScraper(tiendaInfo);
     }
-    
-    if (tiendaNombre.includes('nigramercato') || tiendaUrl.includes('nigramercato')) {
+
+    if (
+      tiendaNombre.includes('nigramercato') ||
+      tiendaUrl.includes('nigramercato')
+    ) {
       return new NigramercatoScraper(tiendaInfo);
+    }
+
+    if (
+      tiendaNombre.includes('footdistrict') ||
+      tiendaUrl.includes('footdistrict')
+    ) {
+      return new FootdistrictScraper(tiendaInfo);
+    }
+
+    if (
+      tiendaNombre.includes('thesneakerone') ||
+      tiendaUrl.includes('thesneakerone')
+    ) {
+      return new TheSneakerOneScraper(tiendaInfo);
     }
 
     // Si no hay un scraper específico, lanzar error
