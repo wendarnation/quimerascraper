@@ -30,113 +30,232 @@ export class FootlockerScraper extends BaseTiendaScraper {
 
   /**
    * Método principal para raspar zapatillas de Footlocker
+   * Mejorado para navegar a través de múltiples páginas si es necesario
    */
   async scrapeZapatillas(): Promise<ZapatillaScraped[]> {
     try {
       await this.initBrowser(this.getRandomUserAgent());
 
-      // URL basada en la primera captura: categoría de zapatillas de hombre
-      const url =
+      // URL base para las páginas de productos
+      const baseUrl =
         'https://footlocker.es/es/category/hombre/zapatillas/sneakers.html';
-      this.logger.log(`Navegando a ${url}`);
-
+      
       // Configurar evasion de fingerprinting
       await this.setupBrowserEvasion();
-
-      // Navegar a la URL con opciones avanzadas de espera
-      const response = await this.page.goto(url, {
-        waitUntil: 'networkidle',
-        timeout: 60000,
-      });
-
-      if (!response || response.status() >= 400) {
-        throw new Error(
-          `Error de navegación: ${response?.status()} - ${response?.statusText()}`,
-        );
-      }
-
-      // Gestionar cookies - verificar si existe el banner antes de intentar cerrarlo
-      await this.handleCookieConsent();
-
-      // Simular desplazamiento humano en la página
-      await this.simulateHumanScrolling();
-
-      // Asegurar que la lista de productos está completamente cargada
-      // Basado en la tercera captura, vemos que los productos están en li con clase "product-container"
-      const productListSelector = 'li.product-container';
-      await this.page.waitForSelector(productListSelector, { timeout: 30000 });
-
-      // Extraer URLs de los productos con el selector actualizado según la imagen
-      const productUrls = await this.extractProductUrls(productListSelector);
-      this.logger.log(`Se encontraron ${productUrls.length} productos`);
-
-      // Limitar la cantidad de productos a procesar
-      const limitedUrls = this.options?.maxItems
-        ? productUrls.slice(0, this.options.maxItems)
-        : productUrls;
-
+      
+      // Set para rastrear URLs ya procesadas y evitar duplicados
+      const processedUrls = new Set<string>();
+      
       // Array para almacenar los resultados
       const zapatillas: ZapatillaScraped[] = [];
-
-      // Procesar cada URL de producto con reintentos
-      for (const [index, url] of limitedUrls.entries()) {
-        try {
-          this.logger.log(
-            `Procesando producto ${index + 1}/${limitedUrls.length}: ${url}`,
-          );
-
-          // Implementar sistema de reintentos para productos individuales
-          let retries = 0;
-          const maxRetries = 3;
-          let success = false;
-          let zapatilla: ZapatillaScraped | null = null;
-
-          while (!success && retries < maxRetries) {
-            try {
-              zapatilla = await this.scrapeZapatillaDetail(url);
-              success = true;
-              if (zapatilla) {
-                zapatillas.push(zapatilla);
-              }
-            } catch (error) {
-              retries++;
-              this.logger.warn(
-                `Intento ${retries}/${maxRetries} fallido para ${url}: ${error instanceof Error ? error.message : String(error)}`,
-              );
-
-              if (retries >= maxRetries) {
-                throw new Error(
-                  `Máximo número de reintentos alcanzado para ${url}`,
-                );
-              }
-
-              // Esperar más tiempo entre reintentos
-              await this.esperaAleatoria(5000, 10000);
-
-              // Si es posible, cambiar User-Agent entre reintentos
-              await this.page.setExtraHTTPHeaders({
-                'User-Agent': this.getRandomUserAgent(),
-              });
+      
+      // Variables para control de paginación
+      let currentPage = 1;
+      let hasMorePages = true;
+      let consecutiveEmptyPages = 0; // Contador para detectar cuando no hay más páginas
+      
+      // Continuar mientras tengamos más páginas y no hayamos alcanzado el límite de zapatillas
+      while (hasMorePages && (!this.options?.maxItems || zapatillas.length < this.options.maxItems) && consecutiveEmptyPages < 2) {
+        // Construir URL para la primera página
+        const url = baseUrl;
+        
+        this.logger.log(`Navegando a página ${currentPage}`);
+        
+        // Si no es la primera página, necesitamos hacer clic en el botón "Siguiente"
+        if (currentPage > 1) {
+          try {
+            // Buscar el botón "Siguiente" por su aria-label o texto
+            const nextBtnSelector = '[aria-label="Ir a la página siguiente"], a:has-text("Siguiente")';
+            
+            // Verificar si existe el botón
+            const nextBtnExists = await this.page.$(nextBtnSelector);
+            if (!nextBtnExists) {
+              this.logger.warn(`No se encontró el botón "Siguiente" para la página ${currentPage}. Finalizando.`);
+              hasMorePages = false;
+              break;
             }
+            
+            // Hacer clic en el botón "Siguiente"
+            this.logger.log(`Haciendo clic en el botón "Siguiente" para ir a la página ${currentPage}`);
+            await this.page.click(nextBtnSelector);
+            
+            // Esperar a que se cargue la página
+            await this.page.waitForNavigation({ waitUntil: 'networkidle', timeout: 30000 });
+            
+            // Esperar un tiempo adicional para asegurar que todo se cargue
+            await this.esperaAleatoria(2000, 4000);
+          } catch (error) {
+            this.logger.error(`Error al navegar a la página ${currentPage}: ${error instanceof Error ? error.message : String(error)}`);
+            hasMorePages = false;
+            break;
           }
+        } else {
+          // Navegar a la URL base (primera página) con opciones avanzadas de espera
+          const response = await this.page.goto(url, {
+            waitUntil: 'networkidle',
+            timeout: 60000,
+          });
 
-          // Esperar un tiempo aleatorio entre peticiones (más largo para evitar detección)
-          await this.esperaAleatoria(3000, 7000);
-
-          // Cada cierto número de productos, cambiar fingerprint
-          if (index > 0 && index % 5 === 0) {
-            await this.rotateFingerprint();
+          if (!response || response.status() >= 400) {
+            this.logger.error(
+              `Error de navegación en página ${currentPage}: ${response?.status()} - ${response?.statusText()}`,
+            );
+            break; // Salir del bucle si hay un error de navegación
           }
+        }
+
+        // Gestionar cookies - verificar si existe el banner antes de intentar cerrarlo
+        await this.handleCookieConsent();
+
+        // Simular desplazamiento humano en la página
+        await this.simulateHumanScrolling();
+
+        // Asegurar que la lista de productos está completamente cargada
+        const productListSelector = 'li.product-container';
+        try {
+          await this.page.waitForSelector(productListSelector, { timeout: 30000 });
         } catch (error) {
-          this.logger.error(
-            `Error al procesar ${url}: ${error instanceof Error ? error.message : String(error)}`,
-          );
+          this.logger.warn(`No se encontraron productos en la página ${currentPage}. Puede que hayamos alcanzado el final.`);
+          consecutiveEmptyPages++;
+          
+          if (consecutiveEmptyPages >= 2) {
+            this.logger.log(`Dos páginas consecutivas sin productos. Finalizando la paginación.`);
+            break;
+          }
+          
+          // Intentar siguiente página
+          currentPage++;
+          continue;
+        }
+
+        // Extraer URLs de los productos con el selector actualizado según la imagen
+        const productUrls = await this.extractProductUrls(productListSelector);
+        
+        // Filtrar productos ya procesados para evitar duplicados
+        const newProductUrls = productUrls.filter(url => !processedUrls.has(url));
+        
+        this.logger.log(`Página ${currentPage}: Encontrados ${productUrls.length} productos, ${newProductUrls.length} son nuevos`);
+        
+        if (newProductUrls.length === 0) {
+          this.logger.warn(`No hay productos nuevos en la página ${currentPage}. Posible duplicación de contenido.`);
+          consecutiveEmptyPages++;
+          
+          if (consecutiveEmptyPages >= 2) {
+            this.logger.log(`Dos páginas consecutivas sin productos nuevos. Finalizando la paginación.`);
+            break;
+          }
+          
+          // Intentar siguiente página
+          currentPage++;
+          continue;
+        } else {
+          // Reiniciar contador si encontramos productos nuevos
+          consecutiveEmptyPages = 0;
+        }
+
+        // Calcular cuántos productos podemos procesar sin exceder el límite
+        const remainingItems = this.options?.maxItems ? this.options.maxItems - zapatillas.length : newProductUrls.length;
+        const limitedUrls = remainingItems > 0 ? newProductUrls.slice(0, remainingItems) : [];
+        
+        this.logger.log(`Procesando ${limitedUrls.length} productos de la página ${currentPage}. Total hasta ahora: ${zapatillas.length}${this.options?.maxItems ? `/${this.options.maxItems}` : ''}`);
+
+        // Procesar cada URL de producto con reintentos
+        for (const [index, url] of limitedUrls.entries()) {
+          try {
+            // Marcar la URL como procesada para evitar duplicados
+            processedUrls.add(url);
+            
+            this.logger.log(
+              `Procesando producto ${index + 1}/${limitedUrls.length} (total: ${zapatillas.length + 1}/${this.options?.maxItems || 'sin límite'}): ${url}`,
+            );
+
+            // Implementar sistema de reintentos para productos individuales
+            let retries = 0;
+            const maxRetries = 3;
+            let success = false;
+            let zapatilla: ZapatillaScraped | null = null;
+
+            while (!success && retries < maxRetries) {
+              try {
+                zapatilla = await this.scrapeZapatillaDetail(url);
+                success = true;
+                if (zapatilla) {
+                  zapatillas.push(zapatilla);
+                }
+              } catch (error) {
+                retries++;
+                this.logger.warn(
+                  `Intento ${retries}/${maxRetries} fallido para ${url}: ${error instanceof Error ? error.message : String(error)}`,
+                );
+
+                if (retries >= maxRetries) {
+                  throw new Error(
+                    `Máximo número de reintentos alcanzado para ${url}`,
+                  );
+                }
+
+                // Esperar más tiempo entre reintentos
+                await this.esperaAleatoria(5000, 10000);
+
+                // Si es posible, cambiar User-Agent entre reintentos
+                await this.page.setExtraHTTPHeaders({
+                  'User-Agent': this.getRandomUserAgent(),
+                });
+              }
+            }
+
+            // Esperar un tiempo aleatorio entre peticiones (más largo para evitar detección)
+            await this.esperaAleatoria(3000, 7000);
+
+            // Cada cierto número de productos, cambiar fingerprint
+            if (index > 0 && index % 5 === 0) {
+              await this.rotateFingerprint();
+            }
+
+            // Verificar si hemos alcanzado el máximo de elementos
+            if (this.options?.maxItems && zapatillas.length >= this.options.maxItems) {
+              this.logger.log(`Se alcanzó el límite máximo de ${this.options.maxItems} productos. Finalizando.`);
+              hasMorePages = false;
+              break;
+            }
+          } catch (error) {
+            this.logger.error(
+              `Error al procesar ${url}: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
+        }
+
+        // Si aún necesitamos más productos, avanzar a la siguiente página
+        if (!this.options?.maxItems || zapatillas.length < this.options.maxItems) {
+          // Avanzamos a la siguiente página 
+          currentPage++;
+          this.logger.log(`AVANZANDO A LA SIGUIENTE PÁGINA: ${currentPage}`);
+          this.logger.log(`Zapatillas procesadas hasta ahora: ${zapatillas.length}${this.options?.maxItems ? `/${this.options.maxItems}` : ''}`);
+          
+          // Esperar un tiempo entre páginas para evitar detección
+          await this.esperaAleatoria(5000, 10000);
+          
+          // Cambiar fingerprint entre páginas
+          await this.rotateFingerprint();
+        } else {
+          // Ya tenemos suficientes productos
+          this.logger.log(`Se alcanzó o superó el número máximo de productos requerido (${this.options?.maxItems}). Finalizando.`);
+          hasMorePages = false;
         }
       }
 
+      const maxItemsStr = this.options?.maxItems ? `/${this.options.maxItems} solicitados` : '';
       this.logger.log(
-        `Scraping completado. Se procesaron ${zapatillas.length} productos`,
+        `Scraping completado. Se procesaron ${zapatillas.length}${maxItemsStr} productos a través de ${currentPage} páginas.`,
       );
+      
+      if (this.options?.maxItems && zapatillas.length < this.options.maxItems) {
+        this.logger.log(`NOTA: No se alcanzó el número solicitado de ${this.options.maxItems} productos. Es posible que se hayan acabado las páginas disponibles.`);
+      }
+      
+      // Estadísticas finales
+      this.logger.log(`Total de URLs únicas procesadas: ${processedUrls.size}`);
+      
       return zapatillas;
     } catch (error) {
       this.logger.error(
@@ -312,7 +431,8 @@ export class FootlockerScraper extends BaseTiendaScraper {
 
         // Si no encuentra enlaces con ese selector, probar con una selección más general
         if (links.length === 0) {
-          return Array.from(document.querySelectorAll(`${selector} a`))
+          // Selector alternativo más flexible basado en atributos de URL
+          const alternativeLinks = Array.from(document.querySelectorAll(`${selector} a`))
             .filter((element) => {
               // Verificar que el elemento es un HTMLAnchorElement y tiene href
               return (
@@ -320,18 +440,32 @@ export class FootlockerScraper extends BaseTiendaScraper {
                 element.href &&
                 element.href.includes('/product/')
               );
-            })
-            .map((element) => (element as HTMLAnchorElement).href);
+            });
+            
+          if (alternativeLinks.length === 0) {
+            // Tercer intento: buscar cualquier enlace con href que contenga /product/
+            return Array.from(document.querySelectorAll('a[href*="/product/"]'))
+              .map((element) => (element as HTMLAnchorElement).href);
+          }
+          
+          return alternativeLinks.map((element) => (element as HTMLAnchorElement).href);
         }
 
         return links.map((link) => (link as HTMLAnchorElement).href);
       };
 
-      return getVisibleUrls();
+      // DEPURACIÓN: Imprimir información sobre los selectores y enlaces encontrados
+      console.log(`Buscando productos con selector: ${selector}`);
+      const urls = getVisibleUrls();
+      console.log(`Se encontraron ${urls.length} URLs de productos`);
+      return urls;
     }, selector);
 
     // Eliminar duplicados y URLs vacías
-    return [...new Set(productUrls)].filter((url) => url && url.length > 0);
+    const uniqueUrls = [...new Set(productUrls)].filter((url) => url && url.length > 0);
+    
+    this.logger.log(`Extracción de URLs: ${uniqueUrls.length} productos únicos encontrados`);
+    return uniqueUrls;
   }
 
   /**
@@ -575,22 +709,46 @@ export class FootlockerScraper extends BaseTiendaScraper {
         }
       }
 
-      // Obtener imagen principal
-      // Basado en la primera captura, la imagen está en un tag img con atributos height, width, alt y src
-      // La URL de la imagen está en el atributo src
+      // Obtener imagen principal basado en la segunda captura
+      // Buscamos la imagen principal dentro del rol button en la galería
       let imagen = '';
-      // Buscar la imagen específicamente en la galería de producto
-      const imgElement = document.querySelector(
-        'div.GallerySlideV2--slideImage img, div.ImageSlider img, img[alt*="Megaride"], img[alt*="zapatilla"]',
+      
+      // Método 1: Buscar img dentro de un div con role="button" en la galería (según captura 2)
+      console.log('Buscando imagen usando el método basado en la captura 2...');
+      const imgGalleryElement = document.querySelector(
+        'div[role="button"] img[height][width][alt], span.Image.Image--product img, .GallerySlide--overMainImage img'
       );
 
-      if (imgElement) {
-        imagen = imgElement.getAttribute('src') || '';
-        console.log('URL de imagen extraída del elemento específico:', imagen);
+      if (imgGalleryElement) {
+        imagen = imgGalleryElement.getAttribute('src') || '';
+        console.log('URL de imagen extraída de la galería:', imagen);
       }
 
-      // Si no se encuentra la imagen específica, buscar en todo el documento
+      // Método 2: Buscar cualquier imagen con altura y anchura especificadas (más genérico)
       if (!imagen) {
+        console.log('Método 1 falló, buscando con método alternativo...');
+        const imgHeightWidth = document.querySelector('img[height][width][alt*="Image"]');
+        if (imgHeightWidth) {
+          imagen = imgHeightWidth.getAttribute('src') || '';
+          console.log('URL de imagen extraída por altura/anchura:', imagen);
+        }
+      }
+
+      // Método 3: Si aún no tenemos imagen, buscar en divs específicos de la galería
+      if (!imagen) {
+        console.log('Método 2 falló, buscando con método específico de galería...');
+        const galleryElements = document.querySelectorAll('.slick-slide.slick-active img, .ProductGallery img, .GalleryImages img');
+        
+        if (galleryElements.length > 0) {
+          const mainImg = galleryElements[0];
+          imagen = mainImg.getAttribute('src') || '';
+          console.log('URL de imagen extraída de la galería:', imagen);
+        }
+      }
+
+      // Método 4: Último recurso, buscar cualquier imagen que parezca un producto
+      if (!imagen) {
+        console.log('Todos los métodos anteriores fallaron, buscando cualquier imagen de producto...');
         const allImages = document.querySelectorAll('img');
         console.log('Total de imágenes encontradas:', allImages.length);
 
@@ -599,13 +757,14 @@ export class FootlockerScraper extends BaseTiendaScraper {
           const alt = img.getAttribute('alt') || '';
           if (
             (src.includes('footlocker.com') ||
-              src.includes('image') ||
-              src.includes('product')) &&
+             src.includes('images.') ||
+             src.includes('/image/') ||
+             src.includes('/product/')) &&
             !src.includes('icon') &&
             !src.includes('logo')
           ) {
             imagen = src;
-            console.log('Imagen encontrada por búsqueda alternativa:', imagen);
+            console.log('Imagen encontrada por búsqueda genérica:', imagen);
             console.log('Alt de la imagen:', alt);
             break;
           }
